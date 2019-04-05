@@ -1,0 +1,43 @@
+{
+   "name": "@serverless-training.com/serverless-website-hosting",
+   "version": "1.0.0",
+   "description": "Quick way to set up a serverless website hosting environment",
+   "scripts": {
+      "test": "echo \"Error: no test specified\" && exit 1"
+   },
+   "repository": {
+      "type": "git",
+      "url": "git+ssh://git@github.com/jthomerson/serverless-website-hosting.git"
+   },
+   "keywords": [
+      "serverless",
+      "aws",
+      "hosting",
+      "s3",
+      "cloudfront",
+      "lambda@edge"
+   ],
+   "author": "Jeremy Thomerson <jeremy@thomersonfamily.com>",
+   "license": "MIT",
+   "bugs": {
+      "url": "https://github.com/jthomerson/serverless-website-hosting/issues"
+   },
+   "homepage": "https://github.com/jthomerson/serverless-website-hosting#readme",
+   "devDependencies": {
+      "@commitlint/travis-cli": "7.5.2",
+      "@silvermine/eslint-config": "2.2.0",
+      "cz-conventional-changelog": "2.1.0",
+      "grunt": "1.0.4",
+      "grunt-cli": "1.3.2",
+      "grunt-contrib-clean": "2.0.0",
+      "grunt-contrib-watch": "1.1.0",
+      "grunt-eslint": "21.0.0",
+      "standard-version": "git+https://github.com/jthomerson/standard-version.git#fix-305-header-repeat"
+   },
+   "dependencies": {},
+   "config": {
+      "commitizen": {
+         "path": "./node_modules/cz-conventional-changelog"
+      }
+   }
+}
