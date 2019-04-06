@@ -1,0 +1,6 @@
+{
+   "name": "cloudformation-custom-resources",
+   "dependencies": {
+      "@silvermine/cloudformation-custom-resources": "1.0.0-rc2"
+   }
+}

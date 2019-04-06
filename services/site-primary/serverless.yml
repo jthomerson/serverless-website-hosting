@@ -1,0 +1,238 @@
+service: site-primary
+
+frameworkVersion: 1.40.0
+
+custom:
+   defaultRegion: us-east-1
+   region: ${opt:region, self:custom.defaultRegion}
+   stage: ${opt:stage, env:USER}
+   objectPrefix: '${file(../vars.json):resourcePrefix}-${self:service}-${self:custom.stage}'
+   # NOTE: this caller reference value must be unique across the account, meaning it can
+   # not be used in another stack. Thus, allow the user to declare it as a CLI option if a
+   # developer needs their own copy of this stack.
+   defaultAccessIdentityCallerReference: 1234
+   accessIdentityCallerReference: ${opt:callerReference, self:custom.defaultAccessIdentityCallerReference}
+   # Name for the export for our custom resources Lambda function to use with Fn::ImportValue:
+   customResourcesServiceTokenExportName: '${file(../vars.json):resourcePrefix}-base-resources-${self:custom.stage}-ServiceToken'
+
+plugins:
+   - '@silvermine/serverless-plugin-cloudfront-lambda-edge'
+
+package:
+   exclude:
+      - '*.yml'
+
+provider:
+   name: aws
+   runtime: nodejs8.10
+   stackTags: # STAGE is automatically added by SLS
+      SLS_SVC_NAME: ${self:service}
+   deploymentBucket: ${file(../vars.json):resourcePrefix}-base-resources-${self:custom.stage}-deploys
+   region: ${self:custom.region}
+   stage: ${self:custom.stage}
+   stackPolicy:
+      -
+         Effect: 'Allow'
+         Action: 'Update:*'
+         Principal: '*'
+         Resource: '*'
+      -
+         Effect: 'Deny'
+         Action: 'Update:Replace'
+         Principal: '*'
+         Resource:
+            - 'LogicalResourceId/WebsiteBucket'
+            - 'LogicalResourceId/WebsiteDistribution'
+            - 'LogicalResourceId/CloudFrontOriginAccessIdentity'
+
+functions:
+   # Handles requests to {realSite}.foo.com/{any-folder}/ (URLs with trailing slashes) -
+   # rewriting the request to the origin (S3 bucket) to include "index.html" so that the
+   # request becomes s3-bucket-origin.com/{any-folder}/index.html. Works at any folder
+   # depth.
+   directoryRootRewriter:
+      name: '${self:custom.objectPrefix}-directory-root-rewriter'
+      handler: src/DirectoryRootRewriteHandler.handler
+      memorySize: 128
+      timeout: 1
+      lambdaAtEdge:
+         distribution: 'WebsiteDistribution'
+         eventType: 'origin-request'
+   # Used by a separate CloudFront distribution to catch all requests to
+   # {redirectFrom}.foo.com and redirect them to the desired domain - {realSite}.foo.com.
+   #
+   # This could be accomplished by means of a single CloudFront distribution that responds
+   # to requests for both {realSite} and {redirectFrom}. However, this redirect
+   # functionality needs to be handled by means of a "viewer-request" function, because
+   # it's only at the viewer-request that we have the actual hostname that the user
+   # requested - by the time we get to an origin-request function, the host header has
+   # been rewritten (by CloudFront) to the domain name for the origin (the S3 bucket
+   # domain). Using a viewer-request function on a single combined distribution handling
+   # both the primary and alternate domains would mean that _every request to either
+   # domain_, including all requests for static assets like CSS, JS, images, et cetera
+   # invokes the function. This results in far more Lambda@Edge invocations than an
+   # origin-request function would (because origin requests are only made for CloudFront
+   # cache _misses_, and not for _hits_). Thus, we save a significant number of
+   # invocations (and thus some cents, but more importantly, performance of not needing to
+   # call our Lambda function) by splitting the distribution into two: the one that has
+   # the origin-request handler shown above - for handling directory default documents -
+   # and this one, which has a viewer-request function that only gets invoked when someone
+   # requests something directly from the alternate domain, which is likely a single
+   # request made by a browser for a page from some old link that links to
+   # {redirectFrom}.foo.com.
+   domainRedirector:
+      name: '${self:custom.objectPrefix}-domain-redirector'
+      handler: src/RedirectToDesiredDomainHandler.handler
+      memorySize: 128
+      timeout: 1
+      lambdaAtEdge:
+         distribution: 'RedirectDistribution'
+         eventType: 'viewer-request'
+
+resources:
+   Resources:
+      # This is a custom resource that uses the custom resources function created in our
+      # base-resources stack. It creates an "origin access identity" for CloudFront to use
+      # to authenticate itself to the website's S3 bucket.
+      CloudFrontOriginAccessIdentity:
+         Type: 'Custom::CloudFrontOriginAccessIdentity'
+         Properties:
+            ServiceToken: { 'Fn::ImportValue': '${self:custom.customResourcesServiceTokenExportName}' }
+            CallerReference: ${self:custom.accessIdentityCallerReference}
+            Comment: '${self:custom.objectPrefix}'
+      # Actual bucket for our website's static files to be hosted:
+      WebsiteBucket:
+         Type: 'AWS::S3::Bucket'
+         Properties:
+            BucketName: '${self:custom.objectPrefix}'
+            AccessControl: 'BucketOwnerFullControl'
+            PublicAccessBlockConfiguration:
+               BlockPublicAcls: true
+               BlockPublicPolicy: true
+               IgnorePublicAcls: true
+               RestrictPublicBuckets: true
+      WebsiteBucketPolicy:
+         Type: 'AWS::S3::BucketPolicy'
+         Properties:
+            Bucket: { Ref: 'WebsiteBucket' }
+            PolicyDocument:
+               Statement:
+                  -
+                     # Allow access to the one user that CloudFront uses to access the
+                     # bucket (this is the CloudFront "Origin Access Identity" created
+                     # above). Overrides the "default-deny" policy for this one user.
+                     Effect: 'Allow'
+                     Action: 's3:GetObject'
+                     Resource: { 'Fn::Join': [ '', [ 'arn:aws:s3:::', { Ref: 'WebsiteBucket' }, '/*' ] ] }
+                     Principal:
+                        CanonicalUser: { 'Fn::GetAtt': [ 'CloudFrontOriginAccessIdentity', 'S3CanonicalUserId' ] }
+      WebsiteCertificate:
+         Type: 'AWS::CertificateManager::Certificate'
+         Properties:
+            DomainName: '${file(../vars.json):siteDomains.realSiteDomain}'
+            DomainValidationOptions:
+               -
+                  DomainName: '${file(../vars.json):siteDomains.realSiteDomain}'
+                  ValidationDomain: '${file(../vars.json):certificateValidationDomain}'
+               -
+                  DomainName: '${file(../vars.json):siteDomains.redirectFrom}'
+                  ValidationDomain: '${file(../vars.json):certificateValidationDomain}'
+            SubjectAlternativeNames:
+               - '${file(../vars.json):siteDomains.redirectFrom}'
+      # This is the CloudFront distribution that actually serves the website on the domain
+      # that you want users to see.
+      WebsiteDistribution:
+         Type: 'AWS::CloudFront::Distribution'
+         Properties:
+            DistributionConfig:
+               DefaultCacheBehavior:
+                  AllowedMethods:
+                     - 'HEAD'
+                     - 'GET'
+                  TargetOriginId: 'WebsiteBucketOrigin'
+                  ViewerProtocolPolicy: 'redirect-to-https'
+                  DefaultTTL: 600 # ten minutes
+                  MaxTTL: 600 # ten minutes
+                  Compress: true
+                  ForwardedValues:
+                     QueryString: false
+                     Cookies:
+                        Forward: 'none'
+               DefaultRootObject: 'index.html'
+               Enabled: true
+               PriceClass: 'PriceClass_100'
+               HttpVersion: 'http2'
+               Aliases:
+                  - '${file(../vars.json):siteDomains.realSiteDomain}'
+               ViewerCertificate:
+                  AcmCertificateArn: { Ref: 'WebsiteCertificate' }
+                  SslSupportMethod: 'sni-only'
+               Origins:
+                  -
+                     Id: 'WebsiteBucketOrigin'
+                     DomainName: { 'Fn::GetAtt': [ 'WebsiteBucket', 'DomainName' ] } # This returns the REST endpoint
+                     S3OriginConfig:
+                        OriginAccessIdentity:
+                           'Fn::Join':
+                              - '/'
+                              - [ 'origin-access-identity/cloudfront', { 'Ref': 'CloudFrontOriginAccessIdentity' } ]
+      # This is a separate CloudFront distribution that is used for the domain that will
+      # redirect to your real site's domain. See the notes on the Lambda@Edge functions
+      # (above) for an explanation of why we use two CloudFront distributions.
+      RedirectDistribution:
+         Type: 'AWS::CloudFront::Distribution'
+         Properties:
+            DistributionConfig:
+               DefaultCacheBehavior:
+                  AllowedMethods:
+                     - 'HEAD'
+                     - 'GET'
+                  TargetOriginId: 'WebsiteBucketOrigin'
+                  ViewerProtocolPolicy: 'redirect-to-https'
+                  DefaultTTL: 86400 # one day (which is CloudFormation default as well)
+                  MaxTTL: 86400 # one day
+                  Compress: true
+                  ForwardedValues:
+                     QueryString: false
+                     Cookies:
+                        Forward: 'none'
+               DefaultRootObject: 'index.html'
+               Enabled: true
+               PriceClass: 'PriceClass_100'
+               HttpVersion: 'http2'
+               Aliases:
+                  - '${file(../vars.json):siteDomains.redirectFrom}'
+               ViewerCertificate:
+                  AcmCertificateArn: { Ref: 'WebsiteCertificate' }
+                  SslSupportMethod: 'sni-only'
+               # Even though we configure this origin, it won't be used because the
+               # Lambda@Edge function will redirect all requests away from this domain
+               # before the origin is used. We could just as easily create a separate
+               # bucket that had nothing in it to serve as the no-op origin.
+               Origins:
+                  -
+                     Id: 'WebsiteBucketOrigin'
+                     DomainName: { 'Fn::GetAtt': [ 'WebsiteBucket', 'DomainName' ] } # This returns the REST endpoint
+                     S3OriginConfig:
+                        OriginAccessIdentity:
+                           'Fn::Join':
+                              - '/'
+                              - [ 'origin-access-identity/cloudfront', { 'Ref': 'CloudFrontOriginAccessIdentity' } ]
+      RealSiteRecordSet:
+         Type: 'AWS::Route53::RecordSet'
+         Properties:
+            Type: 'A'
+            Name: '${file(../vars.json):siteDomains.realSiteDomain}'
+            HostedZoneName: '${file(../vars.json):hostedZoneDomainName}.' # needs the trailing dot
+            AliasTarget:
+               DNSName: { 'Fn::GetAtt': [ 'WebsiteDistribution', 'DomainName' ] }
+               HostedZoneId: 'Z2FDTNDATAQYW2' # see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-route53-aliastarget.html
+      RedirectorRecordSet:
+         Type: 'AWS::Route53::RecordSet'
+         Properties:
+            Type: 'A'
+            Name: '${file(../vars.json):siteDomains.redirectFrom}'
+            HostedZoneName: '${file(../vars.json):hostedZoneDomainName}.' # needs the trailing dot
+            AliasTarget:
+               DNSName: { 'Fn::GetAtt': [ 'RedirectDistribution', 'DomainName' ] }
+               HostedZoneId: 'Z2FDTNDATAQYW2' # see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-route53-aliastarget.html

@@ -1,0 +1,59 @@
+service: base-resources
+
+frameworkVersion: 1.40.0
+
+custom:
+   defaultRegion: us-east-1
+   region: ${opt:region, self:custom.defaultRegion}
+   stage: ${opt:stage, env:USER}
+   objectPrefix: '${file(../vars.json):resourcePrefix}-${self:service}-${self:custom.stage}'
+
+provider:
+   name: aws
+   runtime: nodejs8.10
+   stackTags: # STAGE is automatically added by SLS
+      SLS_SVC_NAME: ${self:service}
+   region: ${self:custom.region}
+   stage: ${self:custom.stage}
+   environment:
+      SLS_SVC_NAME: ${self:service}
+      SLS_STAGE: ${self:custom.stage}
+   iamRoleStatements:
+      # Permissions needed for CloudFrontOriginAccessIdentity:
+      -
+         Effect: 'Allow'
+         Action:
+            - 'cloudfront:CreateCloudFrontOriginAccessIdentity'
+            - 'cloudfront:DeleteCloudFrontOriginAccessIdentity'
+            - 'cloudfront:GetCloudFrontOriginAccessIdentity'
+            - 'cloudfront:GetCloudFrontOriginAccessIdentityConfig'
+            - 'cloudfront:ListCloudFrontOriginAccessIdentities'
+            - 'cloudfront:UpdateCloudFrontOriginAccessIdentity'
+         Resource:
+            - '*'
+
+functions:
+   customResources:
+      name: ${self:custom.objectPrefix}
+      handler: src/CustomResourceHandler.handler
+      memorySize: 256
+      timeout: 300
+
+resources:
+   Outputs:
+      CustomResourcesServiceToken:
+         Description: The ARN of the custom resources Lambda function to use as a service token when using a custom resource.
+         Value: { 'Fn::GetAtt': [ 'CustomResourcesLambdaFunction', 'Arn' ] }
+         Export:
+            Name: '${self:custom.objectPrefix}-ServiceToken'
+      ServiceDeploymentBucket:
+         Description: Bucket used by Serverless to deploy services
+         Value: { 'Ref': 'DeploymentBucket' }
+         Export:
+            Name: '${self:custom.objectPrefix}-DeploymentBucket'
+   Resources:
+      DeploymentBucket:
+         Type: 'AWS::S3::Bucket'
+         DeletionPolicy: 'Retain'
+         Properties:
+            BucketName: '${self:custom.objectPrefix}-deploys'

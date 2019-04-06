@@ -1,0 +1,9 @@
+{
+   "resourcePrefix": "examplesite",
+   "hostedZoneDomainName": "serverless-training.com",
+   "certificateValidationDomain": "serverless-training.com",
+   "siteDomains": {
+      "realSiteDomain": "realsite.serverless-training.com",
+      "redirectFrom": "something.serverless-training.com"
+   }
+}
